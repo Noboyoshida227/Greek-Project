@@ -9,7 +9,7 @@ coordinator: "Nobuo Yoshida"
 
 
 # I) Introduction to MFH
-Stable FH Estimators over T time periods: The Multivariate Fay Herriot Modelling Approach 
+Stable FH Estimators over T time periods: The Multivariate Fay Herriot Modelling Approach   
 
 Goal of the MFH:
 With MFH stable small area estimators for each of $D$ areas over $T$ subsequent time instants shall be computed. Area populations, the samples and the data might change between time periods. Accordingly, we denote $U_t$ the overall population at time $t$, which is partitioned into $D$ areas $U_{1t}, ... ,U_{Dt}$, of respective population sizes $N_{1t}$.
