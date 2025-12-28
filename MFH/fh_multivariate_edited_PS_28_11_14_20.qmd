@@ -249,7 +249,7 @@ Step 3: Compute covariance of domain d by: $cov_{d_{ij}}=rho_{nat_{ij}}*sqrt(Var
 Option 4: This last option might be thought of as unrealistic, but this will always lead to conversion of the ML in the estimation process of the MFH: We also include the option of $0$ covariance.
 
 ----
-####Variance Estimation
+####Variance Estimation  
 ##### Opt 1: Var - National direct
 ```{r}
 ## quickly creating the poverty indicator
@@ -488,7 +488,7 @@ var_smooth_raw<-var_smooth_raw%>%
 #
 all_var_hat_domain_dt<-merge(all_var_hat_domain_dt, var_smooth_raw, by="prov")
 
-rm(var_smooth_raw) 
+rm(var_smooth_raw)  
 
 ```
 
