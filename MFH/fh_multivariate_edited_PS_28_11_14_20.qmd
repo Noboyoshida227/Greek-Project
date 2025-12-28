@@ -488,7 +488,7 @@ var_smooth_raw<-var_smooth_raw%>%
 #
 all_var_hat_domain_dt<-merge(all_var_hat_domain_dt, var_smooth_raw, by="prov")
 
-rm(var_smooth_raw)
+rm(var_smooth_raw) 
 
 ```
 
