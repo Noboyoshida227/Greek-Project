@@ -347,7 +347,7 @@ all_var_hat_domain_dt<-merge(all_var_hat_domain_dt, v_domain_hh_df, by="prov")
 ```
 
 
-##### Opt 3 & 4: Var - Smoothing 
+##### Opt 3 & 4: Var - Smoothing  
 ###### Smoothing Function
 ```{r}
 #' A function to perform variance smoothing
