@@ -3,3 +3,30 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Quarto
+.quarto/
+*_files/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary / logs
+*.log
+*.tmp
+*.bak
+
+# PDF / rendered outputs (optional)
+*.pdf
+*.html
+
+# Data artifacts (optional – uncomment if desired)
+# *.rds
+# *.fst
