@@ -1,0 +1,1196 @@
+###
+title: "The Multivariate Fay-Herriot (MFH) model"
+author: "Philipp D. Schirmer"
+project: "World Bank: EUPM" 
+coordinator: "Nobuo Yoshida"
+###
+
+################################################################################
+
+
+# I) Introduction to MFH
+Stable FH Estimators over T time periods: The Multivariate Fay Herriot Modelling Approach 
+
+Goal of the MFH:
+With MFH stable small area estimators for each of $D$ areas over $T$ subsequent time instants shall be computed. Area populations, the samples and the data might change between time periods. Accordingly, we denote $U_t$ the overall population at time $t$, which is partitioned into $D$ areas $U_{1t}, ... ,U_{Dt}$, of respective population sizes $N_{1t}$.
+
+Generally, the MFH model estimation process is as follows (see Molina & Romero (2024) for a more in-depth discussion):
+-   Step 1: Compute the selected direct area estimators for each target area $d = 1, ..., D$ for each time $t = 1, ..., T$ and estimators of their corresponding sampling variances and covariances. [In this code, different versions of computing/estimating the variance-covariance-matrix are included.]
+
+-   Step 2: Prepare variables (from household survey, administrative data or other sources) at the level of the target area for each time instant in the MFH model. We present a simple approach which performs model selection in a pooled linear regression model without time effects.
+
+-   Step 3: Fit the MFH models to test for homoskedastic area-time effects $({\mu_d}_1, ... , {\mu_d}_T)$ are homoskedastic or not. If we reject the homoskedasticity of variances, implement the MFH3 model. Otherwise, we proceed with the MFH2 model.
+
+-   Step 4: Check the selected model assumptions, including linearity, normality of predicted area effects and standardized model residuals, and the presence of the outlying areas.
+
+-   Step 5: In case of systematic model departures such as isolated departures because of outlying areas, some adjustments might need to be implemented before returning to Step 2 to recompute the MFH model.
+
+-   Step 6: If model assumptions hold, using the above direct estimates and estimated sampling variances and covariances, and the selected auxiliary variables, compute MFH estimators $\hat{\delta}_{dt}^{MFH},\quad d = 1,...,D$ and $t = 1, ..., T$ and their corresponding estimated MSEs.
+
+We will show below the use of the `eblupMFH2()` and `eblupMFH3()` from the R package msae [@permatasari2022package] compute the EBLUPs and their MSE estimates under the MFH models 2 and 3, respectively. The calls to these functions are:
+
+`eblupMFH2(formula, vardir, MAXITER = 100, PRECISION = 1e-04, data)`
+
+`eblupMFH3(formula, vardir, MAXITER = 100, PRECISION = 1e-04, data)`
+
+# II) Target
+
+Note:
+While coding this file, we were heavily relying on the fh_multivariate.qmd that was used in the EUPM project before. Most alterations were introduced to accommodate different versions of the var-covariance-matrix for the direct estimates as well as allowing for swift implementation in each partner country's statistical offices.
+--
+
+We will show how to estimate a poverty map for each year by using the Multivariate Fay Herriot modelling approach. This approach allows us to take advantage of the temporal correlation between poverty rates, i.e. an individuals income in year $t$ is likely correlated with their income in year $t+1$ and also a region's poverty rate is likely to be correlated between different periods, $t$ and $t+1$. 
+
+
+###About the current dataset
+In this example, we use a synthetic data set adapted from R package `sae` called `incomedata`. The original data contains information for $n = 17,119$ fictitious individuals residing across $D = 52$ Spanish provinces. The variables include the name of the province of residence (`provlab`), province code (`prov`), as well as several correlates of income. We have added two additional income vectors corresponding to two additional years of data. This only allows for setting up the code, not to evaluate the practical differences in the different approaches.
+
+The rest of this tutorial shows how to prepare MFH models using a random 10% sample of the `incomedata` to estimate the poverty rates. 
+###1) Installing packages and loading data 
+
+In a first step, we have to load packages that allow for implementation of the following steps.
+
+For MFH, 3 datasets are needed. First, the survey-data that allows for computation of each domain's direct estimates of poverty rate as well as their variance-covariance-matrix. The right-hand-side-variables that are needed for modelling poverty status and the shape-files to plot results.
+
+Potentially, these datasets use different notation, in the following overview, we highlight the most important to allow for a swift implementation of this code in different contexts.
+
+For survey_data:
+`hh_id` ~ household-identifier (to match households between years, in the example code, I create that by my own, but that will not be available for most countries anyways, also, the coding shall not need it, it is just to structure easier)
+`ea_id` ~ psu-unit, i.e. enumeration area
+`provlab` ~ province label, name of domain
+`prov` ~ identifier of province/ domain
+`weight` ~ each household's weight factor to account for sampling
+`year` ~ year-identifier of observation
+
+rhs-data and shape-data also need to have the $provlab$ and $prov$ variable to allow for linking of the different datasets. Generally, we will work with the survey-data only in the first parts of the code. After the direct estimation is finished, we will (as usual in Fay-Harriot-models) work with domain-level data.
+#### Code
+```{r load-data, message = FALSE, warning = FALSE}
+
+if (sum(installed.packages()[,1] %in% "pacman") != 1){
+  
+  install.packages("pacman")
+  
+}
+
+pacman::p_load(sf, data.table, tidyverse, car, msae, 
+               sae, survey, spdep, knitr, MASS, caret)
+
+##load the data
+survey_dt <- readRDS("/Users/philippdanielschirmer/Documents/WB_EUPM/code_snippets/data_shared/pov_direct.rds")
+rhs_dt <- readRDS("/Users/philippdanielschirmer/Documents/WB_EUPM/code_snippets/data_shared/sae_data.rds")
+shp_dt <- readRDS("/Users/philippdanielschirmer/Documents/WB_EUPM/code_snippets/data_shared/geometries.rds")
+
+survey_dt_long<-survey_dt
+#
+#I want to make them wide to match easier
+#note that the rhs-variables are NOT hh-specific, but area-specific, further, interaction terms are also already included
+rhs_dt_wide <- rhs_dt %>%
+  pivot_wider(
+    id_cols = c(provlab, prov),              # what identifies an unique observation
+    names_from = year,            # what to spread across columns
+    values_from = -c(provlab, prov, year), # what values to fill
+    names_glue = "{.value}{year}"    # custom column names
+  )
+
+
+
+#
+#create hh_identifier and create identification/ overlap between the years
+#for now: all hhs are connected for three years, this might not be realistic for the EU-SILC data, but a computation of between the year's variance and covariance is not possible if the variables are not defined on the same probability space. Further, in another file '10-direct-estimate', constructing a panel like this seems to be an option as well.
+survey_dt_altered <- survey_dt %>%
+  group_by(provlab, prov, ea_id, weight, year) %>%
+  mutate(
+    dup_counter = row_number()   # 1, 2, 3...
+  ) %>%
+  ungroup() %>%
+  mutate(
+    hh_key = paste(provlab, prov, ea_id, weight, dup_counter, sep = "__"),
+    hh_id  = as.integer(factor(hh_key))
+  ) %>% 
+  dplyr::select(-hh_key) %>%
+  pivot_wider(
+    id_cols = c(hh_id, ea_id, provlab, prov, weight),              # what identifies a unique observation
+    names_from = year,            # what to spread across columns
+    values_from = c(income, povline), # what values to fill
+    names_glue = "{.value}{year}"    # custom column names
+  )
+
+#combine it all together:
+income_dt<-merge(survey_dt_altered, shp_dt, by=c("prov","provlab"))
+income_dt<-merge(income_dt, rhs_dt_wide, by=c("prov","provlab"))
+#
+#
+#this datatable is only created to understand the issue of linking households between years better, it will not directly be used
+survey_dt_no_overlap <- survey_dt %>%
+  mutate(hh_id = row_number()) %>%      # create an artificial household_ID, in this case, each observation will be treated as different household
+  pivot_wider(
+    id_cols = c(hh_id, ea_id, provlab, prov, weight),              # what identifies a unique observation
+    names_from = year,            # what to spread across columns
+    values_from = c(income, povline), # what values to fill
+    names_glue = "{.value}{year}"    # custom column names
+  )
+#
+income_dt_no_overlap<-merge(survey_dt_no_overlap, shp_dt, by=c("prov","provlab"))
+income_dt_no_overlap<-merge(income_dt_no_overlap, rhs_dt_wide, by=c("prov","provlab"))
+
+
+rm(survey_dt_altered, survey_dt_no_overlap, rhs_dt, rhs_dt_wide, shp_dt)
+```
+
+###2) Step 1 of MFH: Direct Estimation of province level poverty
+We will use the direct HT estimators that use the survey weights in `weight` variable. We also calculate the sample sizes for each province and extract the population sizes for each province/target area. For those using the household/individual level survey data, this may be obtained from the sum of the household or individual weights as appropriate.
+
+In this first step, we use survey_dt. This is a dataframe in the long-format. We use this instead of the wide-format - with potential NAs for many households - as svyby works without identification of households between the years, while svymean (when giving columns that include NAs) seems to have issues computing even the variance.
+
+#### Code
+```{r}
+#include poverty indicators for each year
+income_dt_no_overlap <- 
+  income_dt_no_overlap |>
+  mutate(poor_2012 = ifelse(income2012 < povline2012, 1, 0),
+         poor_2013 = ifelse(income2013 < povline2013, 1, 0),
+         poor_2014 = ifelse(income2014 < povline2014, 1, 0))
+
+#define design object
+design_income_dt_no_overlap <- svydesign(ids = ~ea_id, # PSU-variable, if not available ~1 instead
+                        weights = ~weight, # survey weights
+                        data = income_dt_no_overlap)
+#
+#as svyby's na.rm is excluding observations where at least one of formula's value is na, handing over poor_2012+poor_2013+poor_2014 would lead to no observation being included, leading to only 0s. Therefore: handle all of them individually
+dir_est_domain_2012 <- svyby(
+  formula    = ~poor_2012,
+  by         = ~provlab+prov,
+  design     = design_income_dt_no_overlap,
+  FUN        = svymean,
+  covariance = TRUE,
+  na.rm=TRUE
+)%>%
+  mutate(mse_2012=se^2)%>%
+  mutate(se_2012=se)%>%
+  dplyr::select(-se)
+#
+dir_est_domain_2013 <- svyby(
+  formula    = ~poor_2013,
+  by         = ~provlab+prov,
+  design     = design_income_dt_no_overlap,
+  FUN        = svymean,
+  covariance = TRUE,
+  na.rm=TRUE
+  )%>%
+  mutate(mse_2013=se^2)%>%
+  mutate(se_2013=se)%>%
+  dplyr::select(-se)
+#
+dir_est_domain_2014 <- svyby(
+  formula    = ~poor_2014,
+  by         = ~provlab+prov,
+  design     = design_income_dt_no_overlap,
+  FUN        = svymean,
+  covariance = TRUE,
+  na.rm=TRUE
+  )%>%
+  mutate(mse_2014=se^2)%>%
+  mutate(se_2014=se)%>%
+  dplyr::select(-se)
+#
+#combine them all:
+dir_est_domain_all_years<-merge(dir_est_domain_2012,dir_est_domain_2013, by=c("prov","provlab"))
+dir_est_domain_all_years<-merge(dir_est_domain_all_years,dir_est_domain_2014, by=c("prov","provlab"))
+#get number of observations here, later needed for smoothing of variance estimate
+sampsize_dt <- 
+income_dt_no_overlap |>
+  group_by(prov) |>
+  summarize(N_2012 = sum(!is.na(poor_2012)),
+            N_2013 = sum(!is.na(poor_2013)),
+            N_2014 = sum(!is.na(poor_2014))
+            )
+#
+#combine with direct estimates
+dir_est_domain_all_years<-merge(dir_est_domain_all_years,sampsize_dt, by="prov" )
+
+#some housekeeping
+rm(sampsize_dt,dir_est_domain_2012,dir_est_domain_2013,dir_est_domain_2014,design_income_dt_no_overlap)
+```
+
+###3) Variance-Covariance Matrix of the Sampling Error Distribution
+
+#### Explanation of different approaches
+There is a list of different options to choose from. In the following all these options are computed. After that, the user may choose which model she wants to do MFH-estimations with and analyse further. That is also the position in the code where the decision will need to be taken on implementing one of these options in the flow of the program.
+
+##### Variance
+There are $4$ different ways to go about variance-estimation:
+
+Note that for the computation of the variance, pure cross-sections can be used as no linking of observations between periods is needed. 
+
+$Opt. 1$: Variances can be estimated directly for the national level. This way, all domains share a unique values for variances in the MFH estimation later (e.g. labelled: v1_national_hh).
+$Opt. 2$: Variances can be estimated directly for the domain level. This way, they will differ between domains (e.g. labelled: v1_domain_hh)
+$Opts. 3 & 4$: As there might be only a few observations for each domain-year, we could (potentially) get quite low values for the estimated variances in $Opt. 2$. We can tackle those by smoothing the directly estimated variances of the domains. We will show you how to apply the variance smoothing method suggested by [@you2023application]. Equipped with these smoothed values we can alter our list of variance estimates in two ways: only clear outliers like values very close to or equal to $0$ (I take a cutoff of $0.001$ for now) are replaced by their smoothed counterparts ($Opt. 3$, labelled: v1_domain_hh_sm_outliers) or all observations are smoothed ($Opt. 4$, e.g. labelled: v1_domain_hh_sm_all).
+
+##### Covariance
+Generally, for covariance estimation, there need to be a common probability space for the random variables in question. Therefore, households would need to be included (and identifiable) in different years of the survey. If the survey is not a balanced panel, but rather a cross-section (with potential partial overlap in observations), the covariance is $0$ (or potentially heavily biased when including only some of the households that indeed were surveyed in different rounds).
+
+There are also $4$ different options for the covariance-estimation:
+-$Opt. 1$: Each domain's covariance can be assumed unique based on a direct estimate for the national one. This option is based on household-level data that might or might be not be linkable between different periods, therefore this will only take into account those households that are 'in the overlap' (e.g. labelled: v12_national_hh).
+-$Opt. 2$: Further, we can use the province-level direct estimates covariances. Again, based on household-level data that might or might not be linkable between different periods, therefore this will only take into account those households that are 'in the overlap'. These estimates will probably not always lead to conversion in the following estimation step (e.g. labelled: v12_area_hh).
+-$Opts. 3$: For these options, we aggregate up the (potentially pure cross-section of) household-level data to their enumeration-area (ea). We then compute ea-level poverty rates (weighted mean of poverty status of all households living in the ea) and weights (these are the sum of each household's weight that is living in the ea). This way we can (probably) match most of the ea between the different years (or at least more than at the household-level and by this create a balanced panel). With this, we can then compute the direct estimates of national and domain-level variance and covariance. With the correct weighting (and perfect matching of all ea between the different rounds), the variance estimates are identical to the household-level data. If the household-data is a balanced panel, the covariances that come out from this approach will not differ from those in $Opt. 1 & 2$.
+
+$Opt. 3a$: Compute direct estimates of variance and covariance nationally based on the ea-level based data (e.g. labelled v12_national_ea).
+$Opt. 3b$: Compute direct estimates of variance and covariance for each area domain on the ea-level based data (e.g. labelled v12_area_ea).
+$Opt. 3c$: From the national variance and covariance estimation (see above $Opt 3a$ for covariance), we can compute the national correlation coefficients, $rho_{nat_{ij}}$. We then combine this estimate with the domain-level variances that were measured before to estimate the covariances of each domain.
+
+Overview of this in steps:
+Step 1: The national correlation coefficient for period i and j is computed by $rho_{nat_ij}=Cov_{nat_{ij}}/sqrt(Var_{nat_i}*Var_{nat_j})$,
+Step 2: Here a choice needs to be taken on which domain-level variance estimate shall be used in Step 3. Note that, as variance estimation does not rely on the matching of observations between years, the variance estimation based on hh-level data and on ea-level data (taking into accounts the correct weights) has to lead to the same results. However, for ease in coding, we use the hh-level estimates of this. The following choices are available:
+  - 'direct' (this will be taken from $Opt. 2$ for variance above, e.g. labelled v12_area_nat_rho_ea_direct), 
+  - 'smoothed outliers' (this will be taken from $Opt. 3$ for variance above, labelled as v12_area_nat_rho_ea_sm_outliers)
+  - and smoothed all (this will be taken from $Opt. 4$ for variance above, labelled as v12_area_nat_rho_ea_sm_all). 
+Step 3: Compute covariance of domain d by: $cov_{d_{ij}}=rho_{nat_{ij}}*sqrt(Var_{d_i}*Var_{d_j})$
+
+Option 4: This last option might be thought of as unrealistic, but this will always lead to conversion of the ML in the estimation process of the MFH: We also include the option of $0$ covariance.
+
+----
+####Variance Estimation
+##### Opt 1: Var - National direct
+```{r}
+## quickly creating the poverty indicator
+income_dt_no_overlap <- 
+  income_dt_no_overlap |>
+  mutate(poor_2012 = ifelse(income2012 < povline2012, 1, 0),
+         poor_2013 = ifelse(income2013 < povline2013, 1, 0),
+         poor_2014 = ifelse(income2014 < povline2014, 1, 0))
+
+
+### creating a survey object
+design_obj <- svydesign(ids = ~ea_id, ###replace this argument with the PSU, cluster or enumeration area variable as the case maybe if available, if not use ~1 instead
+                        weights = ~weight, ### survey weights
+                        data = income_dt_no_overlap)
+
+#as above, again have to do each period on its own, but now, with a loop
+## code running variables and input
+vars <- c("poor_2012", "poor_2013", "poor_2014")
+out_names <- c("v1_national_hh", "v2_national_hh", "v3_national_hh")
+v_national_hh <- list()# empty list for results
+
+for (i in seq_along(vars)) {
+  
+  this_var <- vars[i]
+  this_name <- out_names[i]
+  
+  # 1. compute svymean
+  tmp <- svymean(as.formula(paste0("~", this_var)),
+                 design_obj, na.rm = TRUE)
+  
+  # 2. extract covariance matrix
+  vc <- vcov(tmp)
+  
+  # 3. convert to numeric: variance + lower triangular covariance
+  vc_vec <- as.numeric(c(diag(vc), vc[lower.tri(vc, diag = FALSE)]))
+  
+  # 4. store result
+  v_national_hh[[this_name]] <- vc_vec
+}
+
+v_national_hh
+### Next, I will create a dataframe that has each domain-level name and index as well as these variances as columns plus the domain-level number of observation for each year
+
+all_var_hat_domain_dt<-dir_est_domain_all_years%>%
+  dplyr::select(c(prov, provlab, N_2012,N_2013,N_2014))%>%
+  unique()
+all_var_hat_domain_dt$v1_national_hh<-v_national_hh[["v1_national_hh"]]
+all_var_hat_domain_dt$v2_national_hh<-v_national_hh[["v2_national_hh"]]
+all_var_hat_domain_dt$v3_national_hh<-v_national_hh[["v3_national_hh"]]
+```
+
+
+##### Opt 2: Var - Domain direct
+```{r}
+
+#as above, again have to do each period on its own, but now, with a loop
+## code running variables and input
+vars <- c("poor_2012", "poor_2013", "poor_2014")
+out_names <- c("v1_domain_hh", "v2_domain_hh", "v3_domain_hh")
+v_domain_hh <- list()# empty list for results
+
+for (i in seq_along(vars)) {
+  
+  this_var <- vars[i]
+  this_name <- out_names[i]
+  
+  # 1. compute svymean
+ tmp <- svyby(
+    formula    = as.formula(paste0("~", this_var)),
+    by         = ~prov,
+    design     = design_obj,
+    FUN        = svymean,
+    keep.var   = TRUE,       # needed so that influence is stored
+    na.rm      = TRUE
+  )
+  
+  # 2. extract variance values
+   tmp<-vcov(tmp)
+   var_vec <- diag(tmp)
+    names(var_vec) <- rownames(tmp)
+
+  # 4. store result
+  v_domain_hh[[this_name]] <- var_vec
+}
+
+v_domain_hh
+#
+#make it a dataframe
+v_domain_hh_df <- as.data.frame(v_domain_hh)
+v_domain_hh_df$prov <- rownames(v_domain_hh_df)
+
+### Add these to the overviews of variances
+all_var_hat_domain_dt<-merge(all_var_hat_domain_dt, v_domain_hh_df, by="prov")
+
+```
+
+
+##### Opt 3 & 4: Var - Smoothing  
+###### Smoothing Function
+```{r}
+#' A function to perform variance smoothing
+#' 
+#' The variance smoothing function applies the methodology of (Hiridoglou and You, 2023)
+#' which uses simply log linear regression to estimate direct variances for sample 
+#' poverty rates which is useful for replacing poverty rates in areas with low sampling
+#' 
+#' @param domain a vector of unique domain/target areas
+#' @param direct_var the raw variances estimated from sample data
+#' @param sampsize the sample size for each domain
+#' @param y indicator variable at the survey sample level for each household/individual/unit i.e. poor = 1, non-poor = 0
+#' 
+#' @export
+
+varsmoothie_king <- function(domain,
+                             direct_var,
+                             sampsize,
+                             y){
+
+  dt <- data.table(Domain = domain,
+                   var = direct_var,
+                   n = sampsize)
+
+  dt$log_n <- log(dt$n)
+  dt$log_var <- log(dt$var)
+
+  lm_model <- lm(formula = log_var ~ log_n,
+                 data = dt[!(abs(dt$log_var) == Inf),])
+
+  dt$pred_var <- predict(lm_model, newdata = dt)
+
+  dt$var_smooth <- exp(dt$pred_var) * exp(var(y, na.rm = TRUE)/2)
+
+  return(dt[, c("Domain", "var_smooth"), with = F])
+
+}
+```
+
+###### Opt. 3: Var - All smooth
+```{r}
+#need to do if for each year individually
+var_smoothed_2012<-varsmoothie_king(domain = all_var_hat_domain_dt[["prov"]],
+                                 direct_var = all_var_hat_domain_dt[["v1_domain_hh"]],
+                                 sampsize = all_var_hat_domain_dt[["N_2012"]],
+                                 y = income_dt_no_overlap[["poor_2012"]]
+                 )%>%
+  rename("prov"="Domain",
+          "v1_domain_hh_sm_all"="var_smooth") # to be able to quickly add
+#
+var_smoothed_2013<-varsmoothie_king(domain = all_var_hat_domain_dt[["prov"]],
+                                 direct_var = all_var_hat_domain_dt[["v1_domain_hh"]],
+                                 sampsize = all_var_hat_domain_dt[["N_2013"]],
+                                 y = income_dt_no_overlap[["poor_2013"]]
+                 )%>%
+  rename("prov"="Domain",
+          "v2_domain_hh_sm_all"="var_smooth") # to be able to quickly add
+#
+var_smoothed_2014<-varsmoothie_king(domain = all_var_hat_domain_dt[["prov"]],
+                                 direct_var = all_var_hat_domain_dt[["v1_domain_hh"]],
+                                 sampsize = all_var_hat_domain_dt[["N_2014"]],
+                                 y = income_dt_no_overlap[["poor_2014"]]
+                 )%>%
+  rename("prov"="Domain",
+          "v3_domain_hh_sm_all"="var_smooth") # to be able to quickly add
+
+var_smooth_raw<-merge(var_smoothed_2012,var_smoothed_2013,by="prov")
+var_smooth_raw<-merge(var_smooth_raw,var_smoothed_2014,by="prov")
+var_smooth_raw<-merge(var_smooth_raw,all_var_hat_domain_dt,by="prov")
+#some housekeeping
+rm(var_smoothed_2012,var_smoothed_2013,var_smoothed_2014)
+
+```
+### We need to create a dataframe that allows for quick comparison of the direct estimates with the MFH-outputs, for that, I need the smoothed variances as well as the other direct estimates pieces of information from above:
+```{r}
+var_smoothed_for_direct_comparison<-var_smooth_raw[,c(1:4)]%>%
+  rename(
+    Domain = prov,
+    var_smooth_2012=v1_domain_hh_sm_all,
+    var_smooth_2013=v2_domain_hh_sm_all,
+    var_smooth_2014=v3_domain_hh_sm_all
+  )%>%
+  pivot_longer(cols = starts_with("var_smooth_"),
+    names_to = "year",
+    names_pattern = "var_smooth_(\\d+)",
+    values_to = "var_smooth")
+
+
+estimates_for_direct_comparison<-dir_est_domain_all_years%>%
+  dplyr::select(-provlab)%>%
+ pivot_longer(
+    cols = -c(prov),                             # keep IDs or whatever identifies rows
+    names_to = c(".value", "year"),         # .value = the variable name (poor, mse, se, N)
+    names_sep = "_"
+  )%>%
+  dplyr::select(-mse)%>%
+    rename(
+    Domain=prov,
+    Direct = poor,
+    SD = se
+  )%>%
+  mutate(CV  = SD / Direct)
+  
+direct_dt<-merge(var_smoothed_for_direct_comparison,estimates_for_direct_comparison, by=c("year", "Domain"))
+  
+```
+
+Continue with the variance computation
+######Opt. 4: Var - Outliers smooth
+```{r}
+##I need to identify those domain's for which the variance is close or equal to 0, I take 0.001 for this dataset. That cut-off might change regarding the different data!
+#The least invasive method would be only replacing smoothed values for those year-domain observations that are below this cutoff, therefore, I will have to make it year-dependent
+#for each period
+var_smooth_raw$var_1_outlier<-ifelse(var_smooth_raw$v1_domain_hh<=0.001,1,0)
+var_smooth_raw$var_2_outlier<-ifelse(var_smooth_raw$v2_domain_hh<=0.001,1,0)
+var_smooth_raw$var_3_outlier<-ifelse(var_smooth_raw$v3_domain_hh<=0.001,1,0)
+
+#now vt_domain_hh_sm_outliers, one ifelse per period
+var_smooth_raw$v1_domain_hh_sm_outliers<-ifelse(var_smooth_raw$var_1_outlier==1,
+                                  var_smooth_raw$v1_domain_hh_sm_all,
+                                  var_smooth_raw$v1_domain_hh)
+#
+var_smooth_raw$v2_domain_hh_sm_outliers<-ifelse(var_smooth_raw$var_2_outlier==1,
+                                  var_smooth_raw$v2_domain_hh_sm_all,                                                          var_smooth_raw$v2_domain_hh)
+#
+var_smooth_raw$v3_domain_hh_sm_outliers<-ifelse(var_smooth_raw$var_3_outlier==1,
+                                  var_smooth_raw$v3_domain_hh_sm_all,                                                          var_smooth_raw$v3_domain_hh)
+#
+#If any of the period's estimates is too small, one could also use this greyed out option:
+#var_smooth_raw$var_any_outlier<-ifelse(var_smooth_raw$v1_domain_hh<=0.001|var_smooth_raw$v2_domain_hh<=0.001|var_smooth_raw$v3_domain_hh<=0.001,1,0)
+#then the ifelse would need to be repeated as well
+#
+
+#clean-up and add these variance-estimates to the overview
+var_smooth_raw<-var_smooth_raw%>%
+  dplyr::select(c(prov,v1_domain_hh_sm_all,v2_domain_hh_sm_all, v3_domain_hh_sm_all,  v1_domain_hh_sm_outliers, v2_domain_hh_sm_outliers, v3_domain_hh_sm_outliers))
+
+#
+all_var_hat_domain_dt<-merge(all_var_hat_domain_dt, var_smooth_raw, by="prov")
+
+rm(var_smooth_raw)
+
+```
+
+####Covariance Estimation
+##### Opt 1: Cov - National direct based on overlapped households between periods
+```{r}
+
+design_obj <- svydesign(ids = ~ea_id, ###replace this argument with the PSU, cluster or enumeration area variable as the case maybe if available, if not use ~1 instead
+                        weights = ~weight, ### survey weights
+                        data = income_dt_no_overlap)
+#compute the covariance
+tmp <- svymean(~poor_2012+poor_2013+poor_2014,
+                 design_obj, na.rm = TRUE)
+vc <- vcov(tmp)
+vc_vec <- as.numeric(vc[lower.tri(vc, diag = FALSE)])
+names(vc_vec) <- c("v12_direct_hh_nat", "v13_direct_hh_nat", "v23_direct_hh_nat")
+#
+#add these estimates to dataframe overview
+for (n in names(vc_vec)) {
+  all_var_hat_domain_dt[[n]] <- vc_vec[[n]]
+}
+#housekeeping
+rm(vc, tmp, vc_vec)
+
+
+
+```
+
+#####Opt 2: Cov - Domain direct 
+!!!Note: this code needs overlap in the households between the different periods. It will throw an error if there is no overlap in households, I only showcase this snippet with the artificially 'matched' data: income_dt!!!
+```{r}
+#how to get direct estimate of covariance (based on linked ea's)
+income_dt <- 
+  income_dt |>
+  mutate(poor_2012 = ifelse(income2012 < povline2012, 1, 0),
+         poor_2013 = ifelse(income2013 < povline2013, 1, 0),
+         poor_2014 = ifelse(income2014 < povline2014, 1, 0))
+design_obj <- svydesign(ids = ~ea_id, ###replace this argument with the PSU, cluster or enumeration area variable as the case maybe if available, if not use ~1 instead
+                        weights = ~weight, ### survey weights
+                        data = income_dt)
+
+#create place to save
+cov_list <- list()
+
+#for-loop to get covariance of each domain
+for (p in unique(design_obj$variables$prov)) {
+  
+  des_p <- subset(design_obj, prov == p)
+  
+  m <- svymean(
+    ~poor_2012 + poor_2013 + poor_2014,
+    design = des_p,
+    na.rm = TRUE
+  )
+  
+  cov_list[[p]] <- vcov(m)
+  attr(cov_list[[p]], "province") <- p
+}
+
+#
+names(cov_list) <- sapply(cov_list, function(x) attr(x, "province"))
+
+#
+df_cov <- lapply(names(cov_list), function(p){
+  
+  M <- cov_list[[p]]   # call each province's 3×3 matrix
+  
+  data.frame(
+    prov  = p,
+    v1_area_hh  = M[1,1],
+    v2_area_hh  = M[2,2],
+    v3_area_hh  = M[3,3],
+    v12_area_hh = M[1,2],
+    v13_area_hh = M[1,3],
+    v23_area_hh = M[2,3]
+  )
+})
+#
+df_cov <- do.call(rbind, df_cov)
+
+df_area_hh<-df_cov
+
+all_var_hat_domain_dt<-merge(df_area_hh,all_var_hat_domain_dt, by="prov")
+
+rm(df_cov,df_area_hh)
+
+```
+#####Opt 3: Cov - EA-Aggregate
+######Opt 3a: Cov - National direct
+```{r}
+area_year_poverty_no_overlap <- income_dt_no_overlap %>%
+  group_by(ea_id, prov, provlab) %>%
+  summarise(
+    poverty_rate_2012 = weighted.mean(poor_2012, weight, na.rm = TRUE),
+    poverty_rate_2013 = weighted.mean(poor_2013, weight, na.rm = TRUE),
+    poverty_rate_2014 = weighted.mean(poor_2014, weight, na.rm = TRUE),
+    weights=sum(weight, na.rm=TRUE), #this is just an attempt to get the weights to account for the probability of a PSU being sampled, I do not have the correct values though, if the household-weight-variable is the product of PSU-weight*SSU-weight, one might be able to distinguish them?
+    .groups = "drop"
+  )
+
+
+#test whether the poverty-status trough the years at this level changes
+area_year_poverty_no_overlap$test<-ifelse(
+  area_year_poverty_no_overlap$poverty_rate_2012==area_year_poverty_no_overlap$poverty_rate_2013 & 
+    area_year_poverty_no_overlap$poverty_rate_2013==area_year_poverty_no_overlap$poverty_rate_2014, 
+  1,0 )
+
+#define design_object
+design_area_ea_id_no_overlap <- svydesign(
+  ids = ~ea_id, #one could also put 1 here (as every row refers to one ea_id)
+  weights = ~weights,
+  data = area_year_poverty_no_overlap,
+  nest = TRUE
+)
+#
+#try to directly estimate the provinces' (actual domains of interest's) variance
+var_dt_area_direct_test_no_overlap<-svyby(~poverty_rate_2012 + poverty_rate_2013 + poverty_rate_2014, ~prov+provlab, design = design_area_ea_id_no_overlap, FUN = svymean, vartype = "var")
+#
+#create the variance-cov-matrix for poverty_status for all ea_ids between the years
+var_national_ea <- svymean(~poverty_rate_2012 + poverty_rate_2013 + poverty_rate_2014, design_area_ea_id_no_overlap, na.rm=TRUE)
+#
+var_national_ea<-vcov(var_national_ea)
+#
+
+var_national_ea <- as.numeric(c(diag(var_national_ea), var_national_ea[lower.tri(var_national_ea, diag = FALSE)]))
+
+#
+names(var_national_ea) <- c("v1_national_ea","v2_national_ea","v3_national_ea","v12_national_ea", "v13_national_ea", "v23_national_ea")
+
+
+#add to existing all_var_hat_domain_dt, the variances just to compare with the household-based estimates
+all_var_hat_domain_dt$v1_national_ea<-var_national_ea[["v1_national_ea"]]
+all_var_hat_domain_dt$v2_national_ea<-var_national_ea[["v2_national_ea"]]
+all_var_hat_domain_dt$v3_national_ea<-var_national_ea[["v3_national_ea"]]
+all_var_hat_domain_dt$v12_national_ea<-var_national_ea[["v12_national_ea"]]
+all_var_hat_domain_dt$v13_national_ea<-var_national_ea[["v13_national_ea"]]
+all_var_hat_domain_dt$v23_national_ea<-var_national_ea[["v23_national_ea"]]
+#
+#next compute the rho_ts
+#Step 1: compute the correlation coefficients at the national level based on this ea-approach
+all_var_hat_domain_dt$rho_nat_12=var_national_ea["v12_national_ea"]/sqrt(var_national_ea["v1_national_ea"]*var_national_ea["v2_national_ea"])
+all_var_hat_domain_dt$rho_nat_13=var_national_ea["v13_national_ea"]/sqrt(var_national_ea["v1_national_ea"]*var_national_ea["v3_national_ea"])
+all_var_hat_domain_dt$rho_nat_23=var_national_ea["v23_national_ea"]/sqrt(var_national_ea["v2_national_ea"]*var_national_ea["v2_national_ea"])
+
+```
+###### Opt 3b: Cov - Domain direct
+```{r}
+design_area_ea_id_no_overlap <- svydesign(
+  ids = ~ea_id, #one could also put 1 here (as every row refers to one ea_id)
+  weights = ~weights,
+  data = area_year_poverty_no_overlap,
+  nest = TRUE
+)
+
+#create place to save
+cov_list <- list()
+
+#for-loop to get covariance of each domain
+for (p in unique(design_area_ea_id_no_overlap$variables$prov)) {
+  
+  des_p <- subset(design_area_ea_id_no_overlap, prov == p)
+  
+  m <- svymean(
+    ~poverty_rate_2012 + poverty_rate_2013 + poverty_rate_2014,
+    design = des_p,
+    na.rm = TRUE
+  )
+  
+  cov_list[[p]] <- vcov(m)
+  attr(cov_list[[p]], "province") <- p
+}
+
+#
+names(cov_list) <- sapply(cov_list, function(x) attr(x, "province"))
+
+#
+vcov_area_ea <- lapply(names(cov_list), function(p){
+  
+  M <- cov_list[[p]]   # call each province's 3×3 matrix
+  
+  data.frame(
+    prov  = p,
+    v1_area_ea= M[1,1],
+    v2_area_ea= M[2,2],
+    v3_area_ea= M[3,3],
+    v12_area_ea = M[1,2],
+    v13_area_ea = M[1,3],
+    v23_area_ea = M[2,3]
+  )
+})
+#
+vcov_area_ea <- do.call(rbind, vcov_area_ea)
+
+all_var_hat_domain_dt<-merge(all_var_hat_domain_dt,vcov_area_ea,by="prov")
+
+```
+######Using national correlation coefficient
+######Opt 3c-I: Cov - Correlation coefficient + direct variance estimate 
+```{r}
+all_var_hat_domain_dt$v1_area_nat_rho_ea_direct<-all_var_hat_domain_dt$v1_domain_hh
+all_var_hat_domain_dt$v2_area_nat_rho_ea_direct<-all_var_hat_domain_dt$v2_domain_hh
+all_var_hat_domain_dt$v3_area_nat_rho_ea_direct<-all_var_hat_domain_dt$v3_domain_hh
+all_var_hat_domain_dt$v12_area_nat_rho_ea_direct<-all_var_hat_domain_dt$rho_nat_12*sqrt(all_var_hat_domain_dt$v1_domain_hh*all_var_hat_domain_dt$v2_domain_hh)
+all_var_hat_domain_dt$v13_area_nat_rho_ea_direct<-all_var_hat_domain_dt$rho_nat_13*sqrt(all_var_hat_domain_dt$v1_domain_hh*all_var_hat_domain_dt$v3_domain_hh)
+all_var_hat_domain_dt$v23_area_nat_rho_ea_direct<-all_var_hat_domain_dt$rho_nat_23*sqrt(all_var_hat_domain_dt$v2_domain_hh*all_var_hat_domain_dt$v3_domain_hh)
+
+```
+
+###### Opt 3c-II: Cov - All smoothed 
+```{r}
+all_var_hat_domain_dt$v1_area_nat_rho_ea_sm_all<-all_var_hat_domain_dt$v1_domain_hh_sm_all
+all_var_hat_domain_dt$v2_area_nat_rho_ea_sm_all<-all_var_hat_domain_dt$v2_domain_hh_sm_all
+all_var_hat_domain_dt$v3_area_nat_rho_ea_sm_all<-all_var_hat_domain_dt$v3_domain_hh_sm_all
+#
+all_var_hat_domain_dt$v12_area_nat_rho_ea_sm_all<-all_var_hat_domain_dt$rho_nat_12*sqrt(all_var_hat_domain_dt$v1_area_nat_rho_ea_sm_all*all_var_hat_domain_dt$v2_area_nat_rho_ea_sm_all)
+all_var_hat_domain_dt$v13_area_nat_rho_ea_sm_all<-all_var_hat_domain_dt$rho_nat_13*sqrt(all_var_hat_domain_dt$v1_area_nat_rho_ea_sm_all*all_var_hat_domain_dt$v3_area_nat_rho_ea_sm_all)
+all_var_hat_domain_dt$v23_area_nat_rho_ea_sm_all<-all_var_hat_domain_dt$rho_nat_23*sqrt(all_var_hat_domain_dt$v2_area_nat_rho_ea_sm_all*all_var_hat_domain_dt$v3_area_nat_rho_ea_sm_all)
+```
+
+######Opt 3c-III: Cov - Outliers smoothed
+```{r}
+
+all_var_hat_domain_dt$v1_area_nat_rho_ea_sm_outliers<-all_var_hat_domain_dt$v1_domain_hh_sm_outliers
+all_var_hat_domain_dt$v2_area_nat_rho_ea_sm_outliers<-all_var_hat_domain_dt$v2_domain_hh_sm_outliers
+all_var_hat_domain_dt$v3_area_nat_rho_ea_sm_outliers<-all_var_hat_domain_dt$v3_domain_hh_sm_outliers
+all_var_hat_domain_dt$v12_area_nat_rho_ea_sm_outliers<-all_var_hat_domain_dt$rho_nat_12*sqrt(all_var_hat_domain_dt$v1_area_nat_rho_ea_sm_outliers*all_var_hat_domain_dt$v2_area_nat_rho_ea_sm_outliers)
+all_var_hat_domain_dt$v13_area_nat_rho_ea_sm_outliers<-all_var_hat_domain_dt$rho_nat_13*sqrt(all_var_hat_domain_dt$v1_area_nat_rho_ea_sm_outliers*all_var_hat_domain_dt$v3_area_nat_rho_ea_sm_outliers)
+all_var_hat_domain_dt$v23_area_nat_rho_ea_sm_outliers<-all_var_hat_domain_dt$rho_nat_23*sqrt(all_var_hat_domain_dt$v2_area_nat_rho_ea_sm_outliers*all_var_hat_domain_dt$v3_area_nat_rho_ea_sm_outliers)
+
+```
+
+
+#####Opt 4: 0 for cov + Clean up var-cov
+```{r}
+all_var_hat_domain_dt<-all_var_hat_domain_dt%>%
+  dplyr::select(provlab, prov, N_2012, N_2013, N_2014, everything())
+
+all_var_hat_domain_dt$v12_zero<-0
+all_var_hat_domain_dt$v13_zero<-0
+all_var_hat_domain_dt$v23_zero<-0
+
+```
+
+
+###4) Step 2 of MFH: Variable Preparation and Model Selection 
+
+#### Variable Preparation
+We have now shown how to compute direct estimates of poverty. In addition, we compute the variances for the direct estimates. This will allow us to compare the value of small area estimation with the multivariate Fay Herriot Model. The large direct variances point to the imprecision in estimating poverty estimates from the survey. MFH modelling should improve model precision particularly in the areas with very little sampling. With the direct estimation above, we are able to compare the statistical gains/improvements from performing MFH modelling. 
+
+Now, let us begin by preparing the set of variables for MFH estimation. Variable were already done before we loaded the data. 
+
+Obviously, more (and probably better correlates of income and poverty) can be created and included to improve the predictive power of the model. The next step is to take target level variables. The MFH model is a model of poverty rates at the target area level, hence the data format required for this exercise has the province as its unit of observation. This format has a few essential columns: 
+
+* (1) Variables for poverty rates for each time period
+
+* (2) The set of candidate variables from which the most predicted of poverty rates will be selected
+
+* (3) The target area variable identifier (i.e. in this case the province variable `prov` and `provlab`)
+
+We prepare this dataset as follows: 
+
+```{r}
+
+## create the candidate variables
+candidate_vars <- colnames(income_dt_no_overlap)[!colnames(income_dt_no_overlap) %in% 
+                                         c("provlab", "prov", "hhid","ea_id",    
+                                           "income2012","income2013","income2014",
+                                           "povline2012","povline2013","povline2014",
+                                           "geometry","weight")]
+#Make sure some are excluded for sure
+candidate_vars <- candidate_vars[!grepl("sampsize|prov|poverty|income|povline|^v[0-9]|^y[0-9]", 
+                                        candidate_vars)]
+
+### computing the province level data
+prov_dt <- 
+income_dt_no_overlap |>
+  group_by(prov, provlab) |>
+  summarize(
+    across(
+      any_of(candidate_vars),
+      ~ weighted.mean(x = ., w = weight, na.rm = TRUE),
+      .names = "{.col}"
+    )
+  ) 
+
+```
+
+
+#### Model Selection
+
+Next, we apply a simple variable selection process which employs the stepwise regression algorithm using the AIC selection criteria as in described by [@yamashita2007stepwise]. The function `stepAIC_wrapper()` implemented below is a wrapper to the `stepAIC()` function carries all the perfunctory cleaning necessary use the `stepAIC()` function. This includes dropping columns that are entirely missing (`NA`) and keep only complete cases/observations and remove perfectly or near collinear variables and combinations using the variance inflation method.   
+
+```{r}
+
+#' A function to perform stepwise variable selection with AIC selection criteria
+#' 
+#' @param dt data.frame, dataset containing the set of outcome and independent variables
+#' @param xvars character vector, the set of x variables
+#' @param y chr, the name of the y variable
+#' @param vif_threshold integer, a variance inflation factor threshold
+#' 
+#' @import data.table
+#' @importFrom cars vif
+#' @importFrom MASS stepAIC
+
+stepAIC_wrapper <- function(dt, xvars, y, cor_thresh = 0.95) {
+  
+  dt <- as.data.table(dt)
+  
+  # Drop columns that are entirely NA
+  dt <- dt[, which(unlist(lapply(dt, function(x) !all(is.na(x))))), with = FALSE]
+  
+  xvars <- xvars[xvars %in% colnames(dt)]
+  
+  # Keep only complete cases
+  dt <- na.omit(dt[, c(y, xvars), with = FALSE])
+  
+  # Step 1: Remove aliased (perfectly collinear) variables
+  model_formula <- as.formula(paste(y, "~", paste(xvars, collapse = " + ")))
+  lm_model <- lm(model_formula, data = dt)
+  aliased <- is.na(coef(lm_model))
+  if (any(aliased)) {
+    xvars <- names(aliased)[!aliased & names(aliased) != "(Intercept)"]
+  }
+  
+  # Step 2: Remove near-linear combinations
+  xmat <- as.matrix(dt[, ..xvars])
+  combo_check <- tryCatch(findLinearCombos(xmat), error = function(e) NULL)
+  if (!is.null(combo_check) && length(combo_check$remove) > 0) {
+    xvars <- xvars[-combo_check$remove]
+    xmat <- as.matrix(dt[, ..xvars])
+  }
+  
+  # Step 3: Drop highly correlated variables
+  cor_mat <- abs(cor(xmat))
+  diag(cor_mat) <- 0
+  while (any(cor_mat > cor_thresh, na.rm = TRUE)) {
+    cor_pairs <- which(cor_mat == max(cor_mat, na.rm = TRUE), arr.ind = TRUE)[1, ]
+    var1 <- colnames(cor_mat)[cor_pairs[1]]
+    var2 <- colnames(cor_mat)[cor_pairs[2]]
+    # Drop the variable with higher mean correlation
+    drop_var <- if (mean(cor_mat[var1, ]) > mean(cor_mat[var2, ])) var1 else var2
+    xvars <- setdiff(xvars, drop_var)
+    xmat <- as.matrix(dt[, ..xvars])
+    cor_mat <- abs(cor(xmat))
+    diag(cor_mat) <- 0
+  }
+  
+  # Step 4: Warn if still ill-conditioned
+  cond_number <- kappa(xmat, exact = TRUE)
+  if (cond_number > 1e10) {
+    warning("Design matrix is ill-conditioned (condition number > 1e10). Consider reviewing variable selection.")
+  }
+  
+  # Final model fit
+  model_formula <- as.formula(paste(y, "~", paste(xvars, collapse = " + ")))
+  full_model <- lm(model_formula, data = dt)
+  
+  # Stepwise selection
+  stepwise_model <- stepAIC(full_model, direction = "both", trace = 0)
+  
+  return(stepwise_model)
+  
+}
+
+
+```
+
+
+We apply the variable selection process for the selection of each time period model. See the application below: 
+
+```{r, warning = FALSE, message = FALSE}
+
+### the set of outcome variables
+outcome_list <- c("poor_2012", "poor_2013", "poor_2014")
+
+candidate_vars <- candidate_vars[!candidate_vars %in% outcome_list] 
+
+### applying variable selection to each out variable
+stepaicmodel_list <- 
+  mapply(x = outcome_list,
+         FUN = function(x){
+           
+           y <- stepAIC_wrapper(dt = prov_dt,
+                                xvars = candidate_vars,
+                                y = x,
+                                cor_thresh = 0.8)
+           
+           coef_list <- y[["coefficients"]]
+           
+           coef_list <- names(coef_list)[!names(coef_list) %in% "(Intercept)"]
+           
+           return(coef_list)
+           
+         },
+         SIMPLIFY = FALSE)
+
+### now lets create a list of equations
+### create the formulas
+
+mfh_formula <-
+  mapply(x = outcome_list,
+         y = stepaicmodel_list,
+         FUN = function(x, y){
+           
+           formula <- as.formula(paste0(x, " ~ ", paste(y, collapse = " + "))) 
+           
+           return(formula)
+           
+         }, SIMPLIFY = FALSE)
+
+mfh_formula
+
+```
+
+
+Let's run some linear regressions for set of selected variables to get a sense for the predicted power of the models independently
+
+```{r}
+
+lmcheck_obj <- 
+lapply(X = mfh_formula,
+       FUN = lm,
+       data = prov_dt)
+
+
+lapply(X = lmcheck_obj,
+       FUN = summary)
+
+
+
+```
+###5) Step 3 of MFH: Model Estimations
+
+Next, we show how to use the `msae` R package to estimate the Empirical Best Linear Unbiased Predictor (EBLUP) for the poverty map using the `eblupMFH2()` and `eblupMFH3()` functions which allow for time series fay herriot estimation under homoskedastic and heteroskedastic assumptions. We show appropriate tests for deciding whether random effects variance and covariance matrix exhibit homoskedastic or heteroskedastic. For completeness, we also briefly perform the previous described direct estimation in step 1, using the `eblupUFH()` function as well as the `eblupMFH1()` for the fay herriot model. This allows us to show the benefit of MFH estimation over the simple direct estimation as well as the time invariant Fay Herriot Model. 
+
+```{r}
+
+### first lets add the sampling variance and covariance matrix to the prov_dt dataset
+prov_dt <- merge(prov_dt, all_var_hat_domain_dt, by=c("prov","provlab"))
+
+#### now we estimate all 4 models including the multivariate fay herriot models
+
+#the element vardir needs to get the names of those columns given to it that shall be used as input for the var-cov-matrix, e.g. v1_nat, v2_nat..., v23_nat, for that, I create some fillers to distinguish the different versions of var-cov-matrix, basically now the user has to make a decision on which matrix to use
+#
+#make a choice here, first on the variance
+names_var_direct_national<-c("v1_national_hh", "v2_national_hh", "v3_national_hh") #Option 1: National direct
+names_var_direct_domain<-c("v1_domain_hh", "v2_domain_hh", "v3_domain_hh") #Option 2: Domain direct
+names_var_smoothed_all<-c("v1_domain_hh_sm_all", "v2_domain_hh_sm_all", "v3_domain_hh_sm_all") #Option 3: Smoothing all
+names_var_smoothed_outlier<-c("v1_domain_hh_sm_outliers", "v2_domain_hh_sm_outliers", "v3_domain_hh_sm_outliers") #Option 4: Smoothing outliers
+
+#Choose:
+chosen_var_names<-  names_var_smoothed_outlier #just an example, you could take any of the four options above here
+#
+
+#Next, make a choice on covariances:
+names_cvar_national_direct<-c("v12_direct_hh_nat", "v13_direct_hh_nat", "v23_direct_hh_nat") #Option 1: National direct estimate based on overlapping households
+names_cvar_domain_direct<-c("v12_area_hh", "v13_area_hh", "v23_area_hh") #Option 2: domain direct estimate based on overlapping households
+names_cvar_nat_ea<-c("v12_national_ea", "v13_national_ea", "v23_national_ea") #Option 3a: EA-aggregated up, national direct
+names_cvar_domain_ea<-c("v12_area_ea", "v13_area_ea", "v23_area_ea") #Option 3b: EA-aggregated up, area direct
+names_cvar_rho_direct_domain<-c("v12_area_nat_rho_ea_direct","v13_area_nat_rho_ea_direct", "v23_area_nat_rho_ea_direct") #Option 3c-1, use the natioanl correlation with the direct area's variances, can have 0s in it
+names_cvar_rho_smoothed_all_domain<-c("v12_area_nat_rho_ea_sm_all", "v13_area_nat_rho_ea_sm_all", "v23_area_nat_rho_ea_sm_all") #Option 3c-2: national correlation coefficient with smoothed all
+names_cvar_rho_smoothed_outlier_domain<-c("v12_area_nat_rho_ea_sm_outliers", "v13_area_nat_rho_ea_sm_outliers", "v23_area_nat_rho_ea_sm_outliers") #Option 3c-3: national correlation coefficeint with smoothed outliers
+names_cvar_zero<-c("v12_zero", "v13_zero", "v23_zero") #Option 4: 0 for all covariances
+
+#need to make a choice here
+chosen_cvar_names<-  names_cvar_zero #just an example, you could take any of the options above here
+
+names_var_cvar_chosen<-c(chosen_var_names,chosen_cvar_names)
+names_var_cvar_chosen
+```
+Now, compute the different MFH-models for your choice.
+
+```{r}
+#
+model0_obj <- eblupUFH(mfh_formula, vardir = names_var_cvar_chosen, data = prov_dt)
+model1_obj <- eblupMFH1(mfh_formula, vardir = names_var_cvar_chosen, data = prov_dt)
+model2_obj <- eblupMFH2(mfh_formula, vardir = names_var_cvar_chosen, data = prov_dt, MAXITER = 10000)
+model3_obj <- eblupMFH3(mfh_formula, vardir = names_var_cvar_chosen, data = prov_dt)
+
+```
+
+With the MFH3 estimation, we can check if the variance-covariance matrix structure points to heteroskedastic random effects. We do so as follows: 
+
+```{r}
+
+model3_obj$fit$refvarTest
+
+```
+
+This tests the null hypothesis that the variances $\sigma_t^2$ at each pair of time instants $t$ and $s$ are equal against the alternative that they are not. In this case, at significance level of 0.05, we reject the equality of variances between $t = 2013$ and $t = 2014$. Hence we can use the MFH3 model (`eblupMFH3()` function). If these tests supported the equality of variances, then we would use instead the function `eblupMFH2` for estimation. 
+
+###6) Step 4 of MFH: Post Estimation Diagnostics: Model Assumption Checks for Linearity, Normality and Outliers
+
+We now verify the assumptions of the MFH3 model. This includes assessing linearity, the normality of the predicted area effects and standardized residuals, as well as checking for the presence of outlying areas. 
+
+#### The Check for Linearity
+
+We first check the linearity assumption. This can be addressed by regressing the model residuals against the predicted values (EBLUPs). 
+
+```{r}
+
+resids_3 <- cbind(prov_dt$poor_2012 - model3_obj$eblup$poor_2012,
+                  prov_dt$poor_2013 - model3_obj$eblup$poor_2013,
+                  prov_dt$poor_2014 - model3_obj$eblup$poor_2014)
+
+layout(matrix(1:3, nrow = 1, byrow = TRUE))
+
+plot(model3_obj$eblup$poor_2012, resids_3[,1], pch = 19, xlab = "EBLUPs t = 1", ylab = "Residuals t = 1")
+plot(model3_obj$eblup$poor_2013, resids_3[,2], pch = 19, xlab = "EBLUPs t = 2", ylab = "Residuals t = 2")
+plot(model3_obj$eblup$poor_2014, resids_3[,3], pch = 19, xlab = "EBLUPs t = 3", ylab = "Residuals t = 3")
+
+```
+
+
+
+```{r}
+
+fits_3 <- model3_obj$eblup  # EBLUPs (predicted values)
+
+# Run regression of residuals on fitted values for each time period
+lm_resid_fit_t1 <- lm(resids_3[,1] ~ model3_obj$eblup$poor_2012)
+lm_resid_fit_t2 <- lm(resids_3[,2] ~ model3_obj$eblup$poor_2013)
+lm_resid_fit_t3 <- lm(resids_3[,3] ~ model3_obj$eblup$poor_2014)
+
+# View summaries
+summary(lm_resid_fit_t1)
+summary(lm_resid_fit_t2)
+summary(lm_resid_fit_t3)
+
+```
+
+### Evaluating the Normality Assumption
+
+#### The Shapiro Wilks Test
+We use the shapiro wilks test of normality using the `shapiro.test()` function in base R. The Shapiro-Wilk test assesses whether a sample of data is drawn from a normally distributed population. It does so by comparing the order statistics (i.e., sorted values) of the sample to the expected values under a normal distribution. Specifically, the test statistic $W$ is a ratio of the squared correlation between the observed sample quantiles and the corresponding normal quantiles. 
+
+First, we perform the shapiro wilks normality test on the model errors, $\varepsilon$. We show both the normality distribution histogram as well as the qqplots as below: 
+
+```{r}
+
+### evaluating the normality assumption
+resid_dt <- prov_dt[,c("poor_2012", "poor_2013", "poor_2014")] - model3_obj$eblup
+
+### perform the shapiro test
+
+shapiro_obj <- apply(resid_dt, 2, shapiro.test)
+
+summary_dt <- 
+  data.frame(Time = names(shapiro_obj),
+             W = lapply(X = shapiro_obj,
+                        FUN = function(x){
+                          
+                          return(x$statistic[[1]])
+                          
+                        }) %>%
+               as.numeric(),
+             p_value = lapply(X = shapiro_obj,
+                              FUN = function(x){
+                                
+                                return(x$p.value)
+                                
+                              }) %>%
+               as.numeric())
+
+### plot the results
+summary_dt <- 
+  summary_dt %>%
+  mutate(label = paste0("W = ", round(W, 3), "\n", "p = ", signif(p_value, 3)))
+
+resid_dt %>%
+  pivot_longer(cols = everything(), 
+               names_to = "Time", 
+               values_to = "Residual") %>%
+  ggplot(aes(x = Residual)) + 
+  geom_histogram(bins = 10, fill = "steelblue", color = "white") + 
+  geom_text(data = summary_dt, aes(x = -Inf, y = Inf, label = label),
+            hjust = -0.1, vjust = 1.2, inherit.aes = FALSE, size = 3.5) +
+  facet_wrap(~Time, scales = "free") + 
+  theme_minimal() + 
+  labs(title = "Residual Histograms by Time Period")
+
+
+### here's how to create qqplots
+resid_dt %>%
+  pivot_longer(cols = everything(),
+               names_to = "Time",
+               values_to = "Residual") %>%
+  ggplot(aes(sample = Residual)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~Time, scales = "free") +
+  theme_minimal() +
+  labs(title = "QQ Plots of Residuals by Time Period")
+
+```
+
+Likewise, we test the normality of the random effect variable
+
+```{r}
+
+
+#### For the random effects
+raneff_dt <- as.data.frame(model3_obj$randomEffect)
+
+### lets run the shapiro wilks tests again
+shapiro_obj <- apply(raneff_dt, 2, shapiro.test)
+
+
+summary_dt <- 
+  data.frame(Time = names(shapiro_obj),
+             W = lapply(X = shapiro_obj,
+                        FUN = function(x){
+                          
+                          return(x$statistic[[1]])
+                          
+                        }) %>%
+               as.numeric(),
+             p_value = lapply(X = shapiro_obj,
+                              FUN = function(x){
+                                
+                                return(x$p.value)
+                                
+                              }) %>%
+               as.numeric())
+
+### plot the results
+summary_dt <- 
+  summary_dt %>%
+  mutate(label = paste0("W = ", round(W, 3), "\n", "p = ", signif(p_value, 3)))
+
+raneff_dt %>%
+  pivot_longer(cols = everything(), 
+               names_to = "Time", 
+               values_to = "RandEff") %>%
+  ggplot(aes(x = RandEff)) + 
+  geom_histogram(bins = 10, fill = "darkorange", color = "white") + 
+  geom_text(data = summary_dt, aes(x = -Inf, y = Inf, label = label),
+            hjust = -0.1, vjust = 1.2, inherit.aes = FALSE, size = 3.5) +
+  facet_wrap(~Time, scales = "free") + 
+  theme_minimal() + 
+  labs(title = "Randon Effects Histograms by Time Period")
+
+
+```
+
+
+In both cases, we compare the p-value to the 0.05 level of significance. The results suggest we cannot reject the null hypothesis of normally distributed model errors and random effects. 
+
+In some cases, the assumptions described by the MFH3 model are not. Steps 5 and 6 recommend re-estimate the models by creating additional variables via transformation or variable interactions. 
+
+
+### Comparing Direct Estimation to Multivariate Model Outputs
+
+```{r}
+
+#### first let us compare the gains in precision
+model3mse_dt <- 
+  model3_obj$MSE |>
+  mutate(Domain = 1:n()) |>
+  pivot_longer(
+    cols = starts_with("poor"),         # columns to pivot
+    names_to = "year",                  # new column for the years
+    values_to = "modelMSE"
+  ) |>
+  mutate(year = as.integer(substr(year, 5, 8)))
+
+model3pov_dt <- 
+  model3_obj$eblup |>
+  mutate(Domain = 1:n()) |>
+  pivot_longer(
+    cols = starts_with("poor"),         # columns to pivot
+    names_to = "year",                  # new column for the years
+    values_to = "modelpov"
+  ) |>
+  mutate(year = as.integer(substr(year, 5, 8)))
+
+model3pov_dt <- merge(model3mse_dt, model3pov_dt, by = c("Domain", "year"))
+
+
+model3pov_dt <- 
+  model3pov_dt |>
+  mutate(modelCV = sqrt(modelMSE) / modelpov)
+
+
+cv_dt <- merge(model3pov_dt, direct_dt, by = c("Domain", "year"))
+
+cv_dt |>
+  dplyr::select(Domain, year, CV, modelCV) |>
+  pivot_longer(cols = c(CV, modelCV), names_to = "Type", values_to = "CV_value") |>
+  ggplot(aes(x = factor(year), y = CV_value, color = Type, group = Type)) +
+  geom_line(size = 1) +
+  facet_wrap(~ Domain, scales = "free_y") +
+  labs(title = "Comparison of Direct vs Model-based CVs",
+       y = "Coefficient of Variation (CV)",
+       x = "Year",
+       color = "Estimation Type") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+
+```
+
