@@ -4,7 +4,7 @@ author: "Philipp D. Schirmer"
 project: "World Bank: EUPM" 
 coordinator: "Nobuo Yoshida"
 ###
- 
+
 ################################################################################
 
 
@@ -76,9 +76,11 @@ pacman::p_load(sf, data.table, tidyverse, car, msae,
                sae, survey, spdep, knitr, MASS, caret)
 
 ##load the data
-survey_dt <- readRDS("/Users/philippdanielschirmer/Documents/WB_EUPM/code_snippets/data_shared/pov_direct.rds")
-rhs_dt <- readRDS("/Users/philippdanielschirmer/Documents/WB_EUPM/code_snippets/data_shared/sae_data.rds")
-shp_dt <- readRDS("/Users/philippdanielschirmer/Documents/WB_EUPM/code_snippets/data_shared/geometries.rds")
+## load the data (relative paths)
+survey_dt <- readRDS("data/pov_direct.rds")
+rhs_dt    <- readRDS("data/sae_data.rds")
+shp_dt    <- readRDS("data/geometries.rds")
+
 
 survey_dt_long<-survey_dt
 #
